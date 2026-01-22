@@ -20,19 +20,27 @@ with st.sidebar:
         help="Derived from RJR Nabisco Simulation. >4 increases overpayment risk."
     )
     
-    # 2. Due Diligence (Float Slider)
-    due_diligence = st.slider(
+    # 2. Due Diligence (Text Slider -> Mapped to Float)
+    dd_label = st.select_slider(
         "Due Diligence Quality ($\sigma$)", 
-        0.0, 1.0, 0.5, 
-        help="0=Opaque (High Risk), 1=Transparent. Derived from Signaling Games."
+        options=["Low", "Medium", "High"], 
+        value="Medium",
+        help="Low = Opaque (High Risk), High = Transparent."
     )
+    # Mapping for your logic
+    dd_mapping = {"Low": 0.0, "Medium": 0.5, "High": 1.0}
+    due_diligence = dd_mapping[dd_label]
     
-    # 3. Cultural Fit (Float Slider)
-    culture_fit = st.slider(
+    # 3. Cultural Fit (Text Slider -> Mapped to Float)
+    culture_label = st.select_slider(
         "Cultural Fit Score ($C$)", 
-        0.0, 1.0, 0.5, 
+        options=["Friction (Low)", "Neutral", "Synergy (High)"], 
+        value="Neutral",
         help="Derived from Microsoft Simulation. <0.12 is critical failure."
     )
+    # Mapping for your logic
+    culture_mapping = {"Friction (Low)": 0.0, "Neutral": 0.5, "Synergy (High)": 1.0}
+    culture_fit = culture_mapping[culture_label]
 
     st.markdown("---")
     
@@ -63,14 +71,20 @@ with st.container(border=True):
     
     with col_score:
         st.caption("TRANSACTION RISK SCORE")
-        # Dynamic Metric Color Logic
-        score_color = "normal"
-        if risk_report['score'] > 75: score_color = "inverse"
         
+        # Explicit Arrow & Color Logic
+        # Goal: Low Score = Green Down Arrow (↓). High Score = Red Up Arrow (↑).
+        if risk_report['score'] < 40:
+            delta_msg = f"↓ {risk_report['risk_level']}"
+            score_color = "normal"  # Normal = Green for positive/text
+        else:
+            delta_msg = f"↑ {risk_report['risk_level']}"
+            score_color = "inverse" # Inverse = Red for positive/text
+
         st.metric(
             label="", 
             value=f"{risk_report['score']}/100", 
-            delta=risk_report['risk_level'], 
+            delta=delta_msg, 
             delta_color=score_color
         )
     
@@ -125,7 +139,7 @@ with col_chart:
 
         chart_df = pd.DataFrame(list(risk_data.items()), columns=["Factor", "Points"])
         
-        # FIX: Removed horizontal=True so bars point UP (Vertical)
+        # Vertical Chart (Points Up)
         st.bar_chart(chart_df.set_index("Factor"))
 
 # --- SECTION 3: STRATEGY & REPORT ---
