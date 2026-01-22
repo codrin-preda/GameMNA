@@ -36,7 +36,7 @@ with st.sidebar:
 
     st.markdown("---")
     
-    # 4. Strategic Context (Restored Dropdowns)
+    # 4. Strategic Context
     st.subheader("2. Strategic Context")
     reg_risk = st.selectbox("Regulatory Scrutiny", ["Low", "High"])
     comp_level = st.selectbox("Competition Intensity", ["Low", "High"])
@@ -57,29 +57,25 @@ st.markdown("---")
 risk_report = analyzer.calculate_risk_score(num_bidders, due_diligence, culture_fit)
 strategy_rec = analyzer.recommend_strategy(reg_risk, comp_level)
 
-# --- SECTION 1: EXECUTIVE SUMMARY (Heads-Up Display) ---
+# --- SECTION 1: EXECUTIVE SUMMARY ---
 with st.container(border=True):
     col_score, col_rec = st.columns([1, 3])
     
     with col_score:
         st.caption("TRANSACTION RISK SCORE")
         
-        # --- CUSTOM HTML LOGIC FOR SCORE & ARROW ---
-        # 1. Define Color and Arrow Direction
+        # Color & Arrow Logic
         if risk_report['score'] < 40:
-            # Low Risk -> Green, Down Arrow
             text_color = "#09ab3b"  # Green
             arrow = "↓"
         elif risk_report['score'] > 75:
-            # High Risk -> Red, Up Arrow
             text_color = "#ff2b2b"  # Red
             arrow = "↑"
         else:
-            # Medium Risk -> Orange, Up Arrow
             text_color = "#ffaa00"  # Orange
             arrow = "↑"
 
-        # 2. Render using HTML (Removes default Streamlit arrow, adds custom Bold one on Right)
+        # Custom HTML Score Display
         st.markdown(f"""
             <div style="line-height: 1;">
                 <span style="font-size: 3.5rem; font-weight: 700;">{risk_report['score']}/100</span>
@@ -105,7 +101,8 @@ with st.container(border=True):
 col_drivers, col_chart = st.columns([1, 1])
 
 with col_drivers:
-    with st.container(border=True):
+    # FIX 1: Added height=400 to force equal size
+    with st.container(border=True, height=400):
         st.subheader("Key Risk Drivers")
         if not risk_report['drivers']:
             st.info("No critical risk drivers identified at current settings.")
@@ -119,29 +116,33 @@ with col_drivers:
                     st.info(f"• {driver}")
 
 with col_chart:
-    with st.container(border=True):
+    # FIX 1: Added height=400 to force equal size
+    with st.container(border=True, height=400):
         st.subheader("Risk Contribution")
         
-        # Risk Breakdown Data
-        risk_data = {
-            "Auction Dynamics": 0,
-            "Info Asymmetry": 0,
-            "Cultural Constraints": 0
-        }
+        # Calculate Risk Points
+        auction_risk = 0
+        if num_bidders > 4: auction_risk = 50
+        elif num_bidders >= 2: auction_risk = 20
         
-        if num_bidders > 4: risk_data["Auction Dynamics"] = 50
-        elif num_bidders >= 2: risk_data["Auction Dynamics"] = 20
+        info_risk = 0
+        if due_diligence < 0.3: info_risk = 30
+        elif due_diligence < 0.7: info_risk = 15
         
-        if due_diligence < 0.3: risk_data["Info Asymmetry"] = 30
-        elif due_diligence < 0.7: risk_data["Info Asymmetry"] = 15
-        
-        if culture_fit < 0.12: risk_data["Cultural Constraints"] = 50
-        elif culture_fit < 0.5: risk_data["Cultural Constraints"] = 20
+        culture_risk = 0
+        if culture_fit < 0.12: culture_risk = 50
+        elif culture_fit < 0.5: culture_risk = 20
 
-        chart_df = pd.DataFrame(list(risk_data.items()), columns=["Factor", "Points"])
+        # FIX 2: Reshape Data for Multi-Color Bars
+        # By putting each risk in a separate column, Streamlit automatically assigns different colors
+        chart_data = pd.DataFrame({
+            "Auction Dynamics": [auction_risk],
+            "Info Asymmetry": [info_risk],
+            "Cultural Constraints": [culture_risk]
+        })
         
-        # Vertical Bar Chart (Points Upwards)
-        st.bar_chart(chart_df.set_index("Factor"))
+        # Render Chart (Streamlit handles the colors automatically now)
+        st.bar_chart(chart_data)
 
 # --- SECTION 3: STRATEGY & REPORT ---
 with st.container(border=True):
