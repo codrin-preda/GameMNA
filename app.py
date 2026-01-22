@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import altair as alt  # Added for custom colored charts
 from deal_analyzer import DealAnalyzer
 
 # Page Config
@@ -101,7 +102,7 @@ with st.container(border=True):
 col_drivers, col_chart = st.columns([1, 1])
 
 with col_drivers:
-    # FIX 1: Added height=400 to force equal size
+    # Height=400 keeps the boxes equal size
     with st.container(border=True, height=400):
         st.subheader("Key Risk Drivers")
         if not risk_report['drivers']:
@@ -116,11 +117,11 @@ with col_drivers:
                     st.info(f"• {driver}")
 
 with col_chart:
-    # FIX 1: Added height=400 to force equal size
+    # Height=400 keeps the boxes equal size
     with st.container(border=True, height=400):
         st.subheader("Risk Contribution")
         
-        # Calculate Risk Points
+        # 1. Calculate Risk Points
         auction_risk = 0
         if num_bidders > 4: auction_risk = 50
         elif num_bidders >= 2: auction_risk = 20
@@ -133,16 +134,25 @@ with col_chart:
         if culture_fit < 0.12: culture_risk = 50
         elif culture_fit < 0.5: culture_risk = 20
 
-        # FIX 2: Reshape Data for Multi-Color Bars
-        # By putting each risk in a separate column, Streamlit automatically assigns different colors
-        chart_data = pd.DataFrame({
-            "Auction Dynamics": [auction_risk],
-            "Info Asymmetry": [info_risk],
-            "Cultural Constraints": [culture_risk]
-        })
+        # 2. FIX: Create Clean Data for Altair
+        risk_data = pd.DataFrame([
+            {"Driver": "Auction Dynamics", "Risk Points": auction_risk},
+            {"Driver": "Cultural Constraints", "Risk Points": culture_risk},
+            {"Driver": "Info Asymmetry", "Risk Points": info_risk}
+        ])
         
-        # Render Chart (Streamlit handles the colors automatically now)
-        st.bar_chart(chart_data)
+        # 3. FIX: Create Custom Chart with Different Colors
+        # This maps 'Driver' to the X-axis AND to the Color
+        chart = alt.Chart(risk_data).mark_bar().encode(
+            x=alt.X('Driver', sort=None, axis=alt.Axis(labelAngle=0)), # Horizontal labels
+            y=alt.Y('Risk Points', scale=alt.Scale(domain=[0, 60])), # Fixed scale for consistency
+            color=alt.Color('Driver', legend=None), # Different color for each bar, no legend needed
+            tooltip=['Driver', 'Risk Points']
+        ).properties(
+            height=300 # Fits perfectly inside the 400px container
+        )
+        
+        st.altair_chart(chart, use_container_width=True)
 
 # --- SECTION 3: STRATEGY & REPORT ---
 with st.container(border=True):
