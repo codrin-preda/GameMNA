@@ -1,188 +1,278 @@
-import streamlit as st
+"""
+GameMNA — Game-Theoretic M&A Decision Support Tool
+==================================================
+Operationalises the three dissertation findings into a single decision aid:
+
+  H1  Winner's Curse        -> bidder-count (auction) risk
+  H2  Regulatory Equilibrium-> Clean-vs-Remedies strategy via the game model
+  H3  Cultural Constraint   -> hard cultural-fit threshold
+
+This version (a) ADDS the regulatory/Subgame-Perfect-Equilibrium logic that the
+dissertation describes but the previous app never implemented, (b) decouples
+"Due-Diligence Quality" from the simulation symbol sigma, and (c) uses the same
+non-linear synergy curve as microsoft_activision_simulation.py so the tool and
+the thesis agree.
+
+Run with:  streamlit run app.py
+"""
+
+import math
+import datetime
 import pandas as pd
-import altair as alt  # Added for custom colored charts
-from deal_analyzer import DealAnalyzer
+import streamlit as st
 
-# Page Config
-st.set_page_config(page_title="GameMNA: Risk Analyzer", layout="wide")
+# ======================================================================
+# 0. SHARED GAME MODEL  (kept identical to microsoft_activision_simulation.py)
+# ======================================================================
+MAX_SYNERGY       = 25.0
+REMEDY_COST       = 3.0
+BREAKUP_FEE       = 3.0
+LITIGATION_COST   = 1.0
+FAILURE_PAYOFF    = -(BREAKUP_FEE + LITIGATION_COST)   # -4.0
+P_REMEDY_SUCCESS  = 0.95
+C_MID             = 0.25
+STEEPNESS         = 14.0
 
-# Initialize Logic
-analyzer = DealAnalyzer()
+# Cultural threshold below which NPV turns negative (solved in the simulation).
+CULTURE_CRITICAL_LIMIT = 0.113
 
-# --- SIDEBAR: INPUTS ---
-with st.sidebar:
-    st.header("1. Deal Parameters")
-    st.write("Configure the game environment:")
-    
-    # 1. Auction Dynamics
-    num_bidders = st.slider(
-        "Number of Bidders ($N$)", 
-        1, 10, 4, 
-        help="Derived from RJR Nabisco Simulation. >4 increases overpayment risk."
-    )
-    
-    # 2. Due Diligence
-    due_diligence = st.slider(
-        "Due Diligence Quality ($\sigma$)", 
-        0.0, 1.0, 0.5, 
-        help="0=Opaque (High Risk), 1=Transparent. Derived from Signaling Games."
-    )
-    
-    # 3. Cultural Fit
-    culture_fit = st.slider(
-        "Cultural Fit Score ($C$)", 
-        0.0, 1.0, 0.5, 
-        help="Derived from Microsoft Simulation. <0.12 is critical failure."
-    )
+# Regulatory risk -> probability a "clean" (no-concessions) deal ultimately closes.
+# Low risk => clean bid is essentially safe and remedies are an unnecessary cost;
+# Medium/High => the clean path is risky and pre-emptive remedies dominate (H2).
+REG_RISK_TO_CLEAN_SUCCESS = {"Low": 0.95, "Medium": 0.65, "High": 0.35}
 
-    st.markdown("---")
-    
-    # 4. Strategic Context
-    st.subheader("2. Strategic Context")
-    reg_risk = st.selectbox("Regulatory Scrutiny", ["Low", "High"])
-    comp_level = st.selectbox("Competition Intensity", ["Low", "High"])
-    
-    st.markdown("---")
-    st.caption("Adjust sliders to simulate different M&A scenarios.")
+def _sigmoid(x):
+    return 1.0 / (1.0 + math.exp(-x))
+
+def realised_synergy(C):
+    return MAX_SYNERGY * _sigmoid(STEEPNESS * (C - C_MID))
+
+def ev_clean(C, p_clean_success):
+    S = realised_synergy(C)
+    return p_clean_success * S + (1 - p_clean_success) * FAILURE_PAYOFF
+
+def ev_remedy(C):
+    S = realised_synergy(C)
+    return P_REMEDY_SUCCESS * (S - REMEDY_COST) + (1 - P_REMEDY_SUCCESS) * FAILURE_PAYOFF
 
 
-# --- MAIN PAGE: OUTPUTS ---
+# ======================================================================
+# 1. LOGIC CLASS
+# ======================================================================
+class DealAnalyzer:
+    """Game-theoretic M&A risk scorer. Pure logic, no UI dependencies."""
 
-st.title("GameMNA: Game-Theoretic M&A Risk Analyzer")
-st.markdown("""
-*Based on Dissertation Research: 'Game Theory in Mergers and Acquisitions' (2025)* This tool operationalizes **Auction Theory** and **Backward Induction** into a decision support system.
-""")
-st.markdown("---")
+    RISK_THRESHOLD_HIGH     = 75
+    RISK_THRESHOLD_MODERATE = 40
+    CULTURE_CRITICAL_LIMIT  = CULTURE_CRITICAL_LIMIT
 
-# Run Calculations
-risk_report = analyzer.calculate_risk_score(num_bidders, due_diligence, culture_fit)
-strategy_rec = analyzer.recommend_strategy(reg_risk, comp_level)
+    def calculate_risk_breakdown(self, num_bidders, dd_quality, cultural_fit, regulatory_risk):
+        """Returns score, level, recommendation text, factor breakdown, reasons."""
+        breakdown = {
+            "Auction Dynamics":     0,   # H1
+            "Info Asymmetry":       0,
+            "Cultural Constraints": 0,   # H3
+            "Regulatory Exposure":  0,   # H2
+        }
+        reasons = []
 
-# --- SECTION 1: EXECUTIVE SUMMARY ---
-with st.container(border=True):
-    col_score, col_rec = st.columns([1, 3])
-    
-    with col_score:
-        st.caption("TRANSACTION RISK SCORE")
-        
-        # Color & Arrow Logic
-        if risk_report['score'] < 40:
-            text_color = "#09ab3b"  # Green
-            arrow = "↓"
-        elif risk_report['score'] > 75:
-            text_color = "#ff2b2b"  # Red
-            arrow = "↑"
+        # --- H1: Auction / Winner's Curse risk (bidder count) ---
+        if num_bidders > 6:
+            breakdown["Auction Dynamics"] = 50
+            reasons.append("Extreme competition (>6 bidders) — overpayment near-certain")
+        elif num_bidders > 4:
+            breakdown["Auction Dynamics"] = 40
+            reasons.append("High competition (>4 bidders) — strong Winner's-Curse risk")
+        elif num_bidders >= 2:
+            breakdown["Auction Dynamics"] = 20
+            reasons.append("Standard competitive pressure")
+
+        # --- Information asymmetry (due-diligence quality) ---
+        if dd_quality < 0.3:
+            breakdown["Info Asymmetry"] = 30
+            reasons.append("Opaque information (near-blind bidding)")
+        elif dd_quality < 0.7:
+            breakdown["Info Asymmetry"] = 15
+            reasons.append("Partial information / incomplete diligence")
+
+        # --- H3: Cultural constraint ---
+        if cultural_fit < self.CULTURE_CRITICAL_LIMIT:
+            breakdown["Cultural Constraints"] = 50
+            reasons.append(f"Critical culture failure (C < {self.CULTURE_CRITICAL_LIMIT}) — value destroyed regardless of price")
+        elif cultural_fit < 0.5:
+            breakdown["Cultural Constraints"] = 20
+            reasons.append("Poor cultural alignment")
+
+        # --- H2: Regulatory exposure ---
+        if regulatory_risk == "High":
+            breakdown["Regulatory Exposure"] = 30
+            reasons.append("High antitrust exposure — veto player active")
+        elif regulatory_risk == "Medium":
+            breakdown["Regulatory Exposure"] = 15
+            reasons.append("Moderate regulatory scrutiny")
+
+        final_score = min(sum(breakdown.values()), 100)
+
+        if final_score >= self.RISK_THRESHOLD_HIGH:
+            level, rec = "CRITICAL", "WALK AWAY. Expected value is negative."
+        elif final_score >= self.RISK_THRESHOLD_MODERATE:
+            level, rec = "HIGH", "PROCEED WITH CAUTION. Mitigate via concessions / earn-outs."
         else:
-            text_color = "#ffaa00"  # Orange
-            arrow = "↑"
+            level, rec = "LOW", "PROCEED. Fundamentals are sound."
 
-        # Custom HTML Score Display
-        st.markdown(f"""
-            <div style="line-height: 1;">
-                <span style="font-size: 3.5rem; font-weight: 700;">{risk_report['score']}/100</span>
-                <br>
-                <span style="color: {text_color}; font-size: 1.5rem; font-weight: 800; display: block; margin-top: 8px;">
-                    {risk_report['risk_level']} <span style="font-size: 2rem;">{arrow}</span>
-                </span>
-            </div>
-        """, unsafe_allow_html=True)
-    
-    with col_rec:
-        st.caption("STRATEGIC RECOMMENDATION")
-        if risk_report['score'] >= 75:
-            st.error(f"**{risk_report['recommendation']}**")
-        elif risk_report['score'] >= 40:
-            st.warning(f"**{risk_report['recommendation']}**")
+        return final_score, level, rec, breakdown, reasons
+
+    def recommend_strategy(self, cultural_fit, regulatory_risk):
+        """H2 / Subgame-Perfect-Equilibrium recommendation: Clean vs. Remedies."""
+        p_clean = REG_RISK_TO_CLEAN_SUCCESS[regulatory_risk]
+        evc, evr = ev_clean(cultural_fit, p_clean), ev_remedy(cultural_fit)
+
+        if cultural_fit < self.CULTURE_CRITICAL_LIMIT:
+            move = "ABANDON"
+            rationale = ("Cultural fit is below the critical threshold; the deal is "
+                         "NPV-negative even if the regulator approves it (H3).")
+        elif evr >= evc:
+            move = "OFFER PRE-EMPTIVE REMEDIES"
+            rationale = (f"With {regulatory_risk.lower()} regulatory risk, remedies "
+                         f"(E[V]=${evr:.1f}B) dominate litigation (E[V]=${evc:.1f}B). "
+                         "This is the subgame-perfect equilibrium (H2).")
         else:
-            st.success(f"**{risk_report['recommendation']}**")
-            
-        st.caption(f"**Benchmark Reference:** RJR Nabisco (1988) scored **92/100** (Critical Failure).")
+            move = "CLEAN BID ACCEPTABLE"
+            rationale = (f"Regulatory risk is low enough that a clean bid "
+                         f"(E[V]=${evc:.1f}B) beats paying for remedies "
+                         f"(E[V]=${evr:.1f}B).")
+        return move, rationale, evc, evr
 
-# --- SECTION 2: DEEP DIVE (Drivers & Data) ---
-col_drivers, col_chart = st.columns([1, 1])
-
-with col_drivers:
-    # Height=400 keeps the boxes equal size
-    with st.container(border=True, height=400):
-        st.subheader("Key Risk Drivers")
-        if not risk_report['drivers']:
-            st.info("No critical risk drivers identified at current settings.")
+    def get_benchmark(self, score):
+        if score >= 75:
+            return "Ref: RJR Nabisco (1988) / AOL–Time Warner (2000) — value-destructive"
+        elif score >= 40:
+            return "Ref: Moderate-risk transaction — manageable with concessions"
         else:
-            for driver in risk_report['drivers']:
-                if "Critical" in driver:
-                    st.error(f"• {driver}")
-                elif "High" in driver:
-                    st.warning(f"• {driver}")
-                else:
-                    st.info(f"• {driver}")
+            return "Ref: Disney–Pixar (2006) / managed Microsoft–Activision — sound fundamentals"
 
-with col_chart:
-    # Height=400 keeps the boxes equal size
-    with st.container(border=True, height=400):
-        st.subheader("Risk Contribution")
-        
-        # 1. Calculate Risk Points
-        auction_risk = 0
-        if num_bidders > 4: auction_risk = 50
-        elif num_bidders >= 2: auction_risk = 20
-        
-        info_risk = 0
-        if due_diligence < 0.3: info_risk = 30
-        elif due_diligence < 0.7: info_risk = 15
-        
-        culture_risk = 0
-        if culture_fit < 0.12: culture_risk = 50
-        elif culture_fit < 0.5: culture_risk = 20
 
-        # 2. FIX: Create Clean Data for Altair
-        risk_data = pd.DataFrame([
-            {"Driver": "Auction Dynamics", "Risk Points": auction_risk},
-            {"Driver": "Cultural Constraints", "Risk Points": culture_risk},
-            {"Driver": "Info Asymmetry", "Risk Points": info_risk}
-        ])
-        
-        # 3. FIX: Create Custom Chart with Different Colors
-        # This maps 'Driver' to the X-axis AND to the Color
-        chart = alt.Chart(risk_data).mark_bar().encode(
-            x=alt.X('Driver', sort=None, axis=alt.Axis(labelAngle=0)), # Horizontal labels
-            y=alt.Y('Risk Points', scale=alt.Scale(domain=[0, 60])), # Fixed scale for consistency
-            color=alt.Color('Driver', legend=None), # Different color for each bar, no legend needed
-            tooltip=['Driver', 'Risk Points']
-        ).properties(
-            height=300 # Fits perfectly inside the 400px container
+# ======================================================================
+# 2. BRIEFING TEXT
+# ======================================================================
+def generate_briefing_text(score, level, rec, drivers, inputs, strategy):
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    move, rationale, evc, evr = strategy
+    text = f"""==================================================
+GAMEMNA STRATEGIC BRIEFING
+Generated: {date_str}
+==================================================
+
+1. EXECUTIVE SUMMARY
+--------------------
+RISK SCORE:       {score}/100
+RISK LEVEL:       {level}
+RECOMMENDATION:   {rec}
+
+2. INPUT PARAMETERS
+-------------------
+- Number of Bidders:      {inputs['n']}
+- Due-Diligence Quality:  {inputs['dd']*100:.0f}%
+- Cultural Fit Score:     {inputs['culture']}  (critical threshold: {CULTURE_CRITICAL_LIMIT})
+- Regulatory Risk:        {inputs['reg']}
+
+3. GAME-THEORETIC STRATEGY (H2 / Subgame-Perfect Equilibrium)
+-------------------------------------------------------------
+OPTIMAL MOVE: {move}
+ E[V] clean (litigate) = ${evc:.2f}B
+ E[V] remedies         = ${evr:.2f}B
+ Rationale: {rationale}
+
+4. KEY RISK DRIVERS
+-------------------
+"""
+    for d in drivers:
+        text += f" [!] {d}\n"
+    text += """
+--------------------------------------------------
+Methodology:
+- Auction risk: Winner's-Curse Monte Carlo (Chapter 5.2)
+- Strategy: Backward induction on the regulatory game (Chapter 5.3)
+- Cultural threshold: non-linear synergy realisation (Chapter 5.3.3)
+==================================================
+"""
+    return text
+
+
+# ======================================================================
+# 3. STREAMLIT UI
+# ======================================================================
+def main():
+    st.set_page_config(page_title="GameMNA Tool", layout="wide")
+    st.title("GameMNA: Game-Theoretic M&A Risk Analyzer")
+    st.markdown(
+        "*Based on the dissertation 'Game Theory in Mergers and Acquisitions' (2026).* "
+        "Operationalises **Auction Theory** (H1), **Backward Induction / regulatory "
+        "equilibrium** (H2) and the **cultural constraint** (H3)."
+    )
+    st.divider()
+
+    # --- Sidebar inputs ---
+    st.sidebar.header("Deal Parameters")
+    num_bidders = st.sidebar.slider("Number of Bidders (N)", 1, 10, 6,
+                                    help="N>4 sharply raises Winner's-Curse risk (H1).")
+    dd_quality = st.sidebar.slider("Due-Diligence Quality (q)", 0.0, 1.0, 0.5, 0.1,
+                                   help="0.0 = blind bidding, 1.0 = full information. "
+                                        "(Distinct from the simulation's uncertainty σ.)")
+    culture_fit = st.sidebar.slider("Cultural Fit Score (C)", 0.0, 1.0, 0.4, 0.05,
+                                    help=f"C below {CULTURE_CRITICAL_LIMIT} destroys value regardless of price (H3).")
+    regulatory_risk = st.sidebar.selectbox("Regulatory Risk", ["Low", "Medium", "High"], index=2,
+                                           help="Antitrust/veto exposure. Drives the Clean-vs-Remedies strategy (H2).")
+
+    analyzer = DealAnalyzer()
+    score, level, rec, breakdown, drivers = analyzer.calculate_risk_breakdown(
+        num_bidders, dd_quality, culture_fit, regulatory_risk)
+    strategy = analyzer.recommend_strategy(culture_fit, regulatory_risk)
+    move, rationale, evc, evr = strategy
+
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        st.subheader("Transaction Risk Score")
+        st.metric("Risk (0-100)", f"{score}/100")
+        st.caption(analyzer.get_benchmark(score))
+
+        st.subheader("Risk Recommendation")
+        (st.error if level == "CRITICAL" else st.warning if level == "HIGH" else st.success)(
+            f"**{level}:** {rec}")
+
+        st.subheader("Strategic Move (H2)")
+        st.info(f"**{move}**\n\n{rationale}")
+        st.caption(f"E[V] clean = ${evc:.2f}B   ·   E[V] remedies = ${evr:.2f}B")
+
+        st.markdown("**Key Risk Drivers:**")
+        for d in drivers:
+            st.markdown(f"- {d}")
+
+        st.markdown("---")
+        briefing = generate_briefing_text(
+            score, level, rec, drivers,
+            {"n": num_bidders, "dd": dd_quality, "culture": culture_fit, "reg": regulatory_risk},
+            strategy)
+        st.download_button("Download Strategic Briefing", briefing,
+                           file_name="GameMNA_Strategic_Briefing.txt", mime="text/plain")
+
+    with col2:
+        st.subheader("Risk Contribution Breakdown")
+        df_chart = pd.DataFrame({"Risk Factor": list(breakdown.keys()),
+                                 "Contribution": list(breakdown.values())})
+        st.bar_chart(df_chart.set_index("Risk Factor"))
+        st.caption(
+            "**Auction Dynamics** (H1): Winner's-Curse risk from bidder count.  \n"
+            "**Info Asymmetry:** penalty for bidding on noisy signals.  \n"
+            "**Cultural Constraints** (H3): hard non-linear synergy threshold.  \n"
+            "**Regulatory Exposure** (H2): antitrust veto risk driving the strategy choice."
         )
-        
-        st.altair_chart(chart, use_container_width=True)
 
-# --- SECTION 3: STRATEGY & REPORT ---
-with st.container(border=True):
-    st.subheader("Optimal Strategy (Game Tree Output)")
-    st.info(strategy_rec, icon="♟️")
+    st.divider()
+    st.markdown("© 2026 *Game Theory in Mergers and Acquisitions* — George-Codrin Preda · "
+                "Validated via Python simulation.")
 
-    # Download Button logic
-    report_text = f"""
-    M&A GAME THEORETIC RISK BRIEFING
-    --------------------------------
-    Risk Score: {risk_report['score']}/100
-    Risk Level: {risk_report['risk_level']}
-    Recommendation: {risk_report['recommendation']}
 
-    STRATEGIC ADVICE:
-    {strategy_rec}
-
-    KEY DRIVERS:
-    {chr(10).join(['- ' + d for d in risk_report['drivers']])}
-
-    Generated by GameMNA
-    """
-
-    st.download_button(
-        label="Download Strategy Briefing",
-        data=report_text,
-        file_name="deal_briefing.txt",
-        help="Generate a text file report of this analysis."
-    )
-
-# Footer
-st.markdown("---")
-st.caption("© 2026 Game Theory in Mergers and Acquisitions Dissertation Artifact by George-Codrin Preda | Validated via Python Simulation")
+if __name__ == "__main__":
+    main()
